@@ -321,6 +321,26 @@ curl -X POST http://localhost:5000/api/led/on
 
 ---
 
-## 4. คำถามท้ายการทดลอง
-1. สถาปัตยกรรมแบบ Serial-to-MQTT Bridge นี้ช่วยให้อุปกรณ์รุ่นเก่า (Legacy Hardware) ที่ไม่มี Wi-Fi สามารถเข้าร่วมระบบนิเวศ IoT สมัยใหม่ได้อย่างไร?
-2. เพราะเหตุใดเราจึงต้องใช้ `BackgroundService` ในการอ่านข้อมูล Serial แทนที่จะเปิดพอร์ตอ่านตรงๆ ภายในฟังก์ชันของ REST API?
+## 4. คำถามท้ายการทดลอง พร้อมเฉลยคำตอบ
+
+#### 1. สถาปัตยกรรมแบบ Serial-to-MQTT Bridge นี้ช่วยให้อุปกรณ์รุ่นเก่า (Legacy Hardware) ที่ไม่มี Wi-Fi สามารถเข้าร่วมระบบนิเวศ IoT สมัยใหม่ได้อย่างไร?
+* **คำตอบ:**
+  * **Protocol Transformation & Gateway Pattern:** อุปกรณ์ฮาร์ดแวร์รุ่นเก่าหรือเครื่องจักรในงานอุตสาหกรรม (Industrial Legacy Systems) มักใช้การสื่อสารแบบอนุกรม (Serial RS-232, RS-485 Modbus, UART) และไม่มี Network Stack (TCP/IP) หรือโมดูล Wi-Fi/Ethernet ในตัวเอง อีกทั้งไม่สามารถเข้ารหัสความปลอดภัยสมัยใหม่ (TLS/SSL) ได้
+  * **บทบาทของ Edge Gateway ในการเชื่อมต่อ:**
+    1. **Physical & Protocol Adaptation:** Edge Gateway ทำหน้าที่เป็น "ล่ามสื่อสาร" ดักฟังและรับแพ็กเก็ตข้อมูลดิบ (Raw Bytes, ASCII, JSON) จากสาย Serial โดยตรง
+    2. **Modernization to Standard Protocols:** นำข้อมูลที่สกัดได้มาแปลงให้อยู่ในรูปแบบสากล (JSON Schema) แล้ว Publish เข้าสู่ MQTT Topics หรือเปิดช่องทาง RESTful API ให้อุปกรณ์หรือระบบ Cloud สมัยใหม่ดึงไปใช้งานได้ทันที
+    3. **Secure Proxy:** ทำหน้าที่เป็นตัวแทนด้านความปลอดภัย (Security Proxy) ในการเชื่อมต่อกับเครือข่ายภายนอก โดยเพิ่มการเข้ารหัสและระบบความปลอดภัยระดับสากลแทนอุปกรณ์ปลายทาง
+  * **คุ้มค่าทางเศรษฐศาสตร์ (Preserving Legacy Investments):** โรงงานไม่จำเป็นต้องรื้อถอนหรือจัดซื้อเครื่องจักรราคาแพงใหม่ แต่สามารถนำอุปกรณ์เดิมมาผสานรวมเข้าสู่ระบบ Industry 4.0, Real-time Dashboard และ Cloud Analytics ได้ทันที
+
+---
+
+#### 2. เพราะเหตุใดเราจึงต้องใช้ `BackgroundService` ในการอ่านข้อมูล Serial แทนที่จะเปิดพอร์ตอ่านตรงๆ ภายในฟังก์ชันของ REST API?
+* **คำตอบ:**
+  * **ปัญหาด้าน I/O Blocking และ Request-Response Lifecycle:**
+    * สัญญาณ Serial จากไมโครคอนโทรลเลอร์เป็นสตรีมข้อมูลต่อเนื่อง (Continuous Stream) หรือเกิดขึ้นแบบ Event-Driven หากนำการเปิดพอร์ตและคำสั่งอ่าน `_serial.ReadLine()` ไปใส่ไว้ในฟังก์ชันของ REST API เธรดของ HTTP Request จะต้องถูกบล็อก (Block Thread) เพื่อรอข้อมูลจากฮาร์ดแวร์ ซึ่งอาจทำให้เกิด Request Timeout และกิน Connection Pool ของ Kestrel จนระบบไม่สามารถรองรับผู้ใช้คนอื่นได้
+  * **ปัญหาการแย่งชิงพอร์ตสื่อสาร (Exclusive Port Lock / Concurrency Conflict):**
+    * ในระบบปฏิบัติการ (โดยเฉพาะ Windows) พอร์ต COM จะถูกเปิดใช้งานได้เพียง **1 โปรเซส/1 เธรดในเวลาเดียวกันเท่านั้น (Exclusive Access)** หากมีไคลเอนต์เรียก REST API เข้ามาพร้อมกันหลายคำขอ (Concurrent Requests) คำขอที่สองเป็นต้นไปจะเปิดพอร์ตไม่สำเร็จทันทีและเกิดข้อผิดพลาด `IOException: Port is already open` หรือ Access Denied
+  * **ข้อได้เปรียบของการใช้ `BackgroundService` (`SerialBridgeWorker`):**
+    1. **Dedicated Long-Running Worker:** ทำงานเป็นเบื้องหลังแบบต่อเนื่องตลอดอายุของ Gateway ถือครอง Handle ของ Serial Port เพียงตัวเดียวอย่างปลอดภัย (Thread-Safe)
+    2. **Decoupling Data Ingestion from Serving:** แยกส่วนการรับข้อมูล (Ingestion) ออกจากส่วนการให้บริการข้อมูล (Serving) อย่างชัดเจน โดย BackgroundService จะคอยอ่านข้อมูลแล้วนำไปบันทึกลงแคชหน่วยความจำ (`GatewayStateStore`)
+    3. **Instantaneous Response Time ($O(1)$ Lookup):** เมื่อมีคำขอเรียกเข้ามาที่ REST API (`GET /api/telemetry/latest`) ฟังก์ชันสามารถหยิบค่าล่าสุดจากหน่วยความจำส่งคืนให้ผู้ใช้ได้ทันทีในเวลาไม่ถึง 1 มิลลิวินาที โดยไม่ต้องรอการตอบสนองทางกายภาพจากสาย Serial เลย

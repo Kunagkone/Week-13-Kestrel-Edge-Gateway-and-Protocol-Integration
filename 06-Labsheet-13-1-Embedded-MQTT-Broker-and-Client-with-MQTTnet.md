@@ -156,6 +156,24 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "test/edge/topic" -m "Hello from CLI via K
 
 ---
 
-## 4. คำถามท้ายการทดลอง (Review Questions)
-1. การรัน Embedded MQTT Broker ภายใน Kestrel มีข้อได้เปรียบกว่าการติดตั้งซอฟต์แวร์ Mosquitto แยกต่างหากอย่างไรในแง่ของการกระจายงาน (Deployment) และการประมวลผลข้อมูลในหน่วยความจำ?
-2. ฟังก์ชัน `InterceptingPublishAsync` ใน MQTTnet สามารถนำไปประยุกต์ใช้ในการกรองข้อมูลที่ผิดปกติ (Edge Validation) ก่อนส่งต่อให้ Client อื่นได้อย่างไร?
+## 4. คำถามท้ายการทดลอง (Review Questions) พร้อมเฉลยคำตอบ
+
+#### 1. การรัน Embedded MQTT Broker ภายใน Kestrel มีข้อได้เปรียบกว่าการติดตั้งซอฟต์แวร์ Mosquitto แยกต่างหากอย่างไรในแง่ของการกระจายงาน (Deployment) และการประมวลผลข้อมูลในหน่วยความจำ?
+* **คำตอบ:**
+  1. **ความสะดวกในการกระจายงานและการบำรุงรักษา (Deployment & Single-Process Simplicity):**
+     * **Self-Contained All-in-One Application:** ยุบรวมเว็บเซิร์ฟเวอร์ (Kestrel HTTP/REST), SignalR (WebSocket) และ MQTT Broker ไว้ในโปรเซสของแอปพลิเคชัน C# เพียงตัวเดียว ทำให้สะดวกในการนำไปติดตั้ง (Deploy) สามารถรันเป็น Single Binary หรือ Docker Container เดี่ยวได้ทันที โดยไม่ต้องติดตั้ง ดูแลรักษา หรือคอนฟิก Service Daemon ของ Mosquitto ภายนอก
+     * **ลดภาระด้านโครงสร้างพื้นฐาน:** ลดปัญหาความเข้ากันได้ของเวอร์ชันซอฟต์แวร์ (Version Incompatibility), ปัญหา Port Collision บนเครื่องโฮสต์ และลดจุดล้มเหลว (Single Point of Failure) ในการบริหารจัดการเซอร์วิสของระบบปฏิบัติการ
+  2. **ประสิทธิภาพในการประมวลผลข้อมูลในหน่วยความจำ (In-Memory Processing & Zero Network Latency):**
+     * **Zero Network Overhead:** เซอร์วิสอื่นๆ ภายในแอปพลิเคชัน C# (เช่น SerialBridgeWorker, GatewayHub หรือ REST Controllers) สามารถดักจับและฉีดข้อมูลเข้า Broker ได้โดยตรงผ่าน In-Memory API (InjectApplicationMessage) โดยไม่ต้องเปิด TCP Socket วนลูปกลับมาที่ Loopback Interface (127.0.0.1) ซ้ำซ้อน ซึ่งช่วยประหยัด CPU และ Socket Descriptors
+     * **Direct Shared State:** ข้อมูล Payload สามารถส่งเข้าสู่โครงสร้างข้อมูลหน่วยความจำ (เช่น ConcurrentDictionary หรือ In-Memory Cache) ได้ทันที ลดความหน่วงเวลา (Latency) เหลือระดับไมโครวินาที และลดภาระทรัพยากรใน Edge Device ที่มีสเปกจำกัด
+
+---
+
+#### 2. ฟังก์ชัน InterceptingPublishAsync ใน MQTTnet สามารถนำไปประยุกต์ใช้ในการกรองข้อมูลที่ผิดปกติ (Edge Validation) ก่อนส่งต่อให้ Client อื่นได้อย่างไร?
+* **คำตอบ:**
+  * **หลักการทำงาน:** InterceptingPublishAsync ทำหน้าที่เป็น Middleware Pipeline Event Hook ภายใน Broker ที่จะถูกเรียกใช้งานแบบ Asynchronous ทุกครั้งที่มี Client ส่งข้อความ (Publish) เข้ามา **ก่อน** ที่ข้อความนั้นจะถูกกระจาย (Dispatch) ไปยัง Client อื่นๆ ที่ Subscribe ไว้
+  * **แนวทางการนำไปประยุกต์ใช้:**
+    1. **Data Validation & Range Checking (ตรวจสอบความถูกต้องของข้อมูล):** แปลง Payload (เช่น JSON) และตรวจสอบช่วงค่าเซนเซอร์ที่สมเหตุสมผล เช่น ตรวจสอบว่าแรงดันไฟฟ้าต้องอยู่ระหว่าง .0 - 3.3\text{ V}$ หากพบค่าที่หลุดนอกช่วง (Outlier/Sensor Fault) สามารถตรวจจับและติด Flag ได้ทันทีที่ระดับ Edge
+    2. **Message Dropping (การสั่งทิ้งข้อความที่ผิดปกติ):** หากตรวจสอบพบว่าข้อมูลมีรูปแบบไม่ปลอดภัย ผิดมาตรฐาน หรือเป็นสแปม สามารถสั่งตัดทิ้งได้ทันทีโดยการตั้งค่า rgs.ProcessPublish = false; ซึ่งทำให้ Broker ยกเลิกการกระจายข้อความนั้นไปยัง Subscribers ปลายทางทันที
+    3. **Data Sanitization & Enrichment (การเติมเต็มข้อมูล):** สามารถแทรก Metadata สำคัญ เช่น เพิ่ม Timestamp เวลาสากลจาก Gateway, พิกัด Edge Gateway หรือระดับความปลอดภัย ก่อนส่งต่อไปยัง Cloud หรือ Dashboard
+    4. **Access Control & Rate Limiting:** สามารถตรวจเช็กว่า rgs.ClientId มีสิทธิ์ในการ Publish ลง Topic ดังกล่าวหรือไม่ และสามารถตรวจจับอัตราความถี่ (Rate Limiting) เพื่อป้องกันเซนเซอร์หรืออุปกรณ์ที่ทำงานผิดปกติยิงทราฟฟิกล้น Broker (Flood/DoS Attack)
